@@ -1,0 +1,99 @@
+# coralapi on Kubernetes.
+#
+# The pod needs the Edge TPU device node. The clean way is a device plugin
+# that advertises the TPU as an extended resource — e.g. the generic device
+# plugin (github.com/squat/generic-device-plugin) configured to expose
+# /dev/apex_0 as squat.ai/apex — which is what the resource request below
+# assumes. The fallback (commented) is a privileged pod with a hostPath mount.
+#
+# coralapi exits at startup when no TPU is available, so a misplaced pod
+# crash-loops instead of serving without acceleration; keep scheduling
+# pinned to TPU nodes via the resource request or a nodeSelector.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coralapi
+  labels:
+    app: coralapi
+spec:
+  # One TPU serves one process; scale replicas with the number of TPUs.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coralapi
+  template:
+    metadata:
+      labels:
+        app: coralapi
+    spec:
+      # Run unprivileged. supplementalGroups must include the GID that owns the
+      # TPU device node on the host (the 'apex' group for PCIe) so the non-root
+      # user can open it; adjust to your nodes. With the device-plugin path this
+      # is all that is needed — no privileged container.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        supplementalGroups: [44] # example: host 'apex'/device GID — set to yours
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coralapi
+          image: coralapi:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: CORALAPI_MODEL_DIR
+              value: /models
+            - name: CORALAPI_DEVICE
+              value: pci
+          resources:
+            limits:
+              squat.ai/apex: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            # Uploads stream to disk; with a read-only root FS give them a
+            # writable, size-bounded scratch volume.
+            - name: uploads
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+          # Fallback without a device plugin — LAST RESORT, drops the hardening
+          # above. Prefer the device plugin (squat.ai/apex resource) instead.
+          # securityContext:
+          #   privileged: true
+          # volumeMounts:
+          #   - name: apex
+          #     mountPath: /dev/apex_0
+      volumes:
+        - name: models
+          emptyDir: {}
+        - name: uploads
+          emptyDir:
+            sizeLimit: 2Gi
+        # - name: apex
+        #   hostPath:
+        #     path: /dev/apex_0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coralapi
+spec:
+  selector:
+    app: coralapi
+  ports:
+    - port: 80
+      targetPort: 8000

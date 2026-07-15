@@ -1,0 +1,60 @@
+[project]
+name = "coralapi"
+version = "0.1.0"
+description = "FastAPI service exposing inference APIs for Google Coral Edge TPUs (PCIe and USB)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "pillow>=10.3",
+    # <2: tflite-runtime's C extension is built against the numpy 1.x ABI;
+    # numpy 2.x triggers "numpy.core.multiarray failed to import" at TPU
+    # interpreter creation. The whole Coral/tflite stack is numpy-1.x era.
+    "numpy>=1.26,<2",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# The Edge TPU stack is Linux-only; everything else in this project imports and
+# passes tests without it (the delegate is mocked in tests).
+#
+# IMPORTANT: tflite-runtime and libedgetpu must be built against the SAME TFLite
+# version or the delegate loads but fails at invoke. PyPI's tflite-runtime does
+# not match any current libedgetpu, so this extra is a bring-your-own-matching-
+# libedgetpu convenience only. The supported, working combination ships in the
+# Dockerfile (feranick tflite_runtime + libedgetpu, both TF 2.17.1).
+tpu = [
+    "tflite-runtime>=2.14; sys_platform == 'linux'",
+]
+# Optional Prometheus metrics at /metrics (enable with CORALAPI_METRICS_ENABLED).
+prometheus = [
+    "prometheus-client>=0.20",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+    "prometheus-client>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coralapi"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

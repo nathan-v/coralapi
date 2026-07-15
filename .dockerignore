@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests/
+models/
+graphify-out/
+CLAUDE.md
+.claude/
+deploy/
+docker-compose.yml
