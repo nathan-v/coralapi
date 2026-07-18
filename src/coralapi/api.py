@@ -99,7 +99,7 @@ async def _prepare(
     settings, registry, executor, jobs = _state(request)
     path = await save_upload(file, settings.max_upload_bytes, settings.resolved_upload_dir)
     try:
-        image = open_image_checked(path, settings.max_image_dim)
+        image = open_image_checked(path, settings.max_image_dim, settings.allowed_image_formats)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
@@ -156,8 +156,8 @@ def healthz() -> dict:
 def readyz(request: Request) -> dict:
     """Ready only if the Coral device bound at startup is still present and
     unchanged. Goes 503 when the device is unplugged, or re-enumerated on a
-    replug (different sysfs path) — in which case the loaded delegate is stale
-    and `POST /v1/reset` is needed to rebind."""
+    replug (different sysfs path); then the loaded delegate is stale and
+    `POST /v1/reset` is needed to rebind."""
     _, registry, *_ = _state(request)
     current = {d.path for d in device.discover_all()}
     bound = getattr(request.app.state, "bound_devices", set())
@@ -165,9 +165,10 @@ def readyz(request: Request) -> dict:
         raise HTTPException(503, "No Coral Edge TPU detected")
     if current != bound:
         raise HTTPException(
-            503, "Edge TPU changed since startup (replug?) — POST /v1/reset to rebind"
+            503, "Edge TPU changed since startup (replug?); POST /v1/reset to rebind"
         )
-    return {"status": "ok", "devices": sorted(current), "models_available": len(registry.list())}
+    # Report a count, not sysfs paths (no host topology disclosure).
+    return {"status": "ok", "devices": len(current), "models_available": len(registry.list())}
 
 
 @router.post(
@@ -195,12 +196,14 @@ def reset(request: Request) -> dict:
     try:
         cleared = executor.run_sync(do_reset)
     except (tflite.InterpreterUnavailable, tflite.DelegateUnavailable) as exc:
-        raise HTTPException(503, f"Edge TPU unavailable after reset: {exc}") from exc
+        # Route through the sanitizer: log detail server-side, return a generic
+        # message (don't leak str(exc) to the client).
+        raise _map_inference_error(exc) from exc
     request.app.state.bound_devices = {d.path for d in device.discover_all()}
     return {
         "reset": True,
         "models_cleared": cleared,
-        "devices": sorted(request.app.state.bound_devices),
+        "devices": len(request.app.state.bound_devices),
     }
 
 
@@ -216,7 +219,8 @@ def status(request: Request) -> RuntimeStatus:
     return RuntimeStatus(
         interpreter=tflite.interpreter_source(),
         device_preference=settings.device,
-        devices=device.discover_all(),
+        # A count, not sysfs paths (no host device-topology disclosure).
+        devices=len(device.discover_all()),
     )
 
 

@@ -79,7 +79,10 @@ spec:
           #     mountPath: /dev/apex_0
       volumes:
         - name: models
-          emptyDir: {}
+          emptyDir:
+            # Bound the model cache volume. Keep this >= CORALAPI_MAX_MODEL_CACHE_BYTES
+            # (default 4Gi) so the app-level cap trips before the kubelet evicts.
+            sizeLimit: 5Gi
         - name: uploads
           emptyDir:
             sizeLimit: 2Gi

@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     # model_dir, bounding disk use on the attacker-influenced download path.
     max_downloaded_models: int = 100
 
+    # Disk caps for the model cache (the download path is attacker-influenced,
+    # so a single huge "model" or many models could otherwise fill the volume).
+    # A download over max_model_bytes is aborted mid-stream; a download that
+    # would push the cache total over max_model_cache_bytes is refused.
+    max_model_bytes: int = 256 * 1024 * 1024  # 256 MB per model
+    max_model_cache_bytes: int = 4 * 1024 * 1024 * 1024  # 4 GB total
+
+    # Optional content-integrity pinning: model name -> expected sha256 hex.
+    # When a downloaded model's name is listed, its bytes are verified and the
+    # download is rejected on mismatch. Empty by default (transit is already
+    # https-only; this adds content integrity for security-conscious deploys).
+    model_checksums: dict[str, str] = {}
+
     # Number of inference requests allowed to wait for the TPU (which executes
     # one inference at a time) before new requests are rejected with 429.
     queue_depth: int = 16
@@ -82,6 +95,11 @@ class Settings(BaseSettings):
     # endpoints and enforced the same way.
     max_image_dim: int = 15360
     max_video_dim: int = 15360
+
+    # Optional image-format allowlist (PIL format names, e.g. ["JPEG", "PNG"]).
+    # Empty accepts any decodable image; restricting shrinks the Pillow decoder
+    # attack surface for deployments that only need a few formats.
+    allowed_image_formats: list[str] = []
 
 
 settings = Settings()

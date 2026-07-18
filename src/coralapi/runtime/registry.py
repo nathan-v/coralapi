@@ -12,6 +12,7 @@ configured model source as <source>/<name>.tflite and cached in model_dir.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import urllib.parse
@@ -23,6 +24,8 @@ from coralapi.runtime.engine import LoadedModel, load_labels
 from coralapi.schemas import ModelInfo
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
+# Label files are tiny; a huge one is suspicious, so cap them tightly.
+_LABEL_MAX_BYTES = 16 * 1024 * 1024
 
 
 class ModelNotFound(KeyError):
@@ -72,6 +75,9 @@ class ModelRegistry:
         model_download: bool = True,
         allow_insecure_source: bool = False,
         max_downloaded_models: int = 100,
+        max_model_bytes: int = 256 * 1024 * 1024,
+        max_model_cache_bytes: int = 4 * 1024 * 1024 * 1024,
+        checksums: dict[str, str] | None = None,
         device: str = "auto",
         edgetpu_lib: str | None = None,
     ):
@@ -79,6 +85,9 @@ class ModelRegistry:
         self.model_source = (model_source or "").rstrip("/")
         self.model_download = model_download and bool(self.model_source)
         self.max_downloaded_models = max_downloaded_models
+        self.max_model_bytes = max_model_bytes
+        self.max_model_cache_bytes = max_model_cache_bytes
+        self.checksums = {k: v.lower() for k, v in (checksums or {}).items()}
         self.device = device
         self.edgetpu_lib = edgetpu_lib
         if self.model_download and not allow_insecure_source:
@@ -134,7 +143,8 @@ class ModelRegistry:
         return [
             ModelInfo(
                 name=p.stem,
-                path=str(p),
+                # Filename only: the absolute server path is not disclosed.
+                path=p.name,
                 size_bytes=p.stat().st_size,
                 edgetpu_compiled=p.stem.endswith("_edgetpu"),
                 has_labels=self._labels_path(p.stem) is not None,
@@ -145,12 +155,15 @@ class ModelRegistry:
 
     # -- acquisition ---------------------------------------------------------
 
-    def _fetch(self, url: str, dest: Path) -> bool:
-        """Stream url to dest atomically. False on 404, raises on other errors.
+    def _fetch(self, url: str, dest: Path, max_bytes: int) -> bool:
+        """Stream url to dest atomically, capped at max_bytes. False on 404,
+        raises on other errors.
 
         Redirects are not followed: a redirect to another host would let the
         model source steer a server-side request anywhere (SSRF), and a
-        redirect on the same host has no legitimate use here.
+        redirect on the same host has no legitimate use here. The byte cap (the
+        declared Content-Length, then a running total as a fallback) stops a
+        huge download from filling the models volume.
         """
         tmp = dest.with_name(dest.name + ".part")
         try:
@@ -163,8 +176,19 @@ class ModelRegistry:
                         f"(-> {resp.headers.get('location')!r})"
                     )
                 resp.raise_for_status()
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    raise ModelDownloadError(
+                        f"{url} declares {declared} bytes, over the {max_bytes}-byte limit"
+                    )
+                written = 0
                 with tmp.open("wb") as f:
                     for chunk in resp.iter_bytes():
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise ModelDownloadError(
+                                f"{url} exceeds the {max_bytes}-byte download limit"
+                            )
                         f.write(chunk)
             tmp.replace(dest)
             return True
@@ -178,6 +202,22 @@ class ModelRegistry:
             return 0
         return sum(1 for _ in self.model_dir.glob("*.tflite"))
 
+    def _cache_bytes(self) -> int:
+        if not self.model_dir.is_dir():
+            return 0
+        return sum(p.stat().st_size for p in self.model_dir.glob("*.tflite"))
+
+    def _verify_checksum(self, name: str, path: Path) -> None:
+        """If a sha256 is pinned for this model, verify it; delete + raise on
+        mismatch. No-op when no checksum is configured."""
+        expected = self.checksums.get(name)
+        if not expected:
+            return
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            path.unlink(missing_ok=True)
+            raise ModelDownloadError(f"Checksum mismatch for model {name!r}")
+
     def _ensure_local(self, name: str) -> Path:
         path = self.model_dir / f"{name}.tflite"
         if path.is_file():
@@ -189,16 +229,26 @@ class ModelRegistry:
                 f"Model cache is full ({self.max_downloaded_models} models); "
                 "refusing to download more. Remove unused models from model_dir."
             )
+        if self._cache_bytes() >= self.max_model_cache_bytes:
+            raise ModelDownloadError(
+                f"Model cache is full ({self.max_model_cache_bytes} bytes); "
+                "refusing to download more. Remove unused models from model_dir."
+            )
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        if not self._fetch(f"{self.model_source}/{name}.tflite", path):
+        if not self._fetch(f"{self.model_source}/{name}.tflite", path, self.max_model_bytes):
             raise ModelNotFound(name)
+        self._verify_checksum(name, path)
         # Best-effort auto-fetch of the model's shared label file (coco_labels,
         # imagenet_labels, …) so `label` is populated without manual setup. The
         # file is shared across models, so it's downloaded once and reused.
         label_file = zoo_label_file(name)
         if label_file and not (self.model_dir / label_file).is_file():
             try:
-                self._fetch(f"{self.model_source}/{label_file}", self.model_dir / label_file)
+                self._fetch(
+                    f"{self.model_source}/{label_file}",
+                    self.model_dir / label_file,
+                    _LABEL_MAX_BYTES,
+                )
             except ModelDownloadError:
                 pass
         return path

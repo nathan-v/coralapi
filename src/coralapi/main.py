@@ -87,6 +87,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
         model_download=cfg.model_download,
         allow_insecure_source=cfg.allow_insecure_model_source,
         max_downloaded_models=cfg.max_downloaded_models,
+        max_model_bytes=cfg.max_model_bytes,
+        max_model_cache_bytes=cfg.max_model_cache_bytes,
+        checksums=cfg.model_checksums,
         device=cfg.device,
         edgetpu_lib=cfg.edgetpu_lib,
     )

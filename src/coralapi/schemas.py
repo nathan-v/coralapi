@@ -9,12 +9,12 @@ class DeviceInfo(BaseModel):
 class RuntimeStatus(BaseModel):
     interpreter: str | None = Field(description="Python module providing the TFLite interpreter")
     device_preference: str = Field(description="Configured CORALAPI_DEVICE value")
-    devices: list[DeviceInfo] = Field(description="Edge TPU hardware discovered on the host")
+    devices: int = Field(description="Number of Coral Edge TPUs discovered on the host")
 
 
 class ModelInfo(BaseModel):
     name: str = Field(description="Model name (file stem), used in inference requests")
-    path: str
+    path: str = Field(description="Model filename (not the absolute server path)")
     size_bytes: int
     edgetpu_compiled: bool = Field(
         description="True if the file follows the *_edgetpu.tflite naming convention"

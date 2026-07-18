@@ -35,12 +35,16 @@ async def save_upload(file: UploadFile, max_bytes: int, upload_dir: Path | None)
     return path
 
 
-def open_image_checked(path: Path, max_dim: int) -> Image.Image:
+def open_image_checked(
+    path: Path, max_dim: int, allowed_formats: list[str] | None = None
+) -> Image.Image:
     """Open an image lazily and validate its dimensions from the header.
 
     Pixel decoding is deferred until the inference worker touches the data,
     so this is cheap to call on the request path. PIL's decompression-bomb
-    ceiling is aligned to the configured limit instead of PIL's default.
+    ceiling is aligned to the configured limit instead of PIL's default. When
+    allowed_formats is non-empty, the decoded format (PIL's `format`, e.g.
+    "JPEG") must be in it, shrinking the Pillow decoder attack surface.
     """
     Image.MAX_IMAGE_PIXELS = max_dim * max_dim
     try:
@@ -52,6 +56,8 @@ def open_image_checked(path: Path, max_dim: int) -> Image.Image:
         raise HTTPException(
             413, f"Image resolution exceeds the limit; the longest edge may not exceed {max_dim}px"
         ) from None
+    if allowed_formats and image.format not in allowed_formats:
+        raise HTTPException(415, f"Image format {image.format!r} is not accepted")
     width, height = image.size
     if width > max_dim or height > max_dim:
         raise HTTPException(
