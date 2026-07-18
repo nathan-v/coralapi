@@ -89,6 +89,9 @@ def test_list_models_finds_tflite(client, tmp_path):
     assert models[0]["edgetpu_compiled"] is True
     assert models[0]["has_labels"] is True
     assert models[0]["loaded"] is False
+    # path is the filename only, not the absolute server path (no disclosure)
+    assert models[0]["path"] == "ssd_mobilenet_edgetpu.tflite"
+    assert "/" not in models[0]["path"]
 
 
 # -- sync inference -------------------------------------------------------------
@@ -140,6 +143,18 @@ def test_image_over_resolution_limit_413(make_client, fake_model):
     )
     assert resp.status_code == 413
     assert "longest edge" in resp.json()["detail"]
+
+
+def test_format_allowlist_rejects_disallowed(make_client, fake_model):
+    client = make_client(allowed_image_formats=["JPEG"])  # upload() is a PNG
+    resp = client.post("/v1/vision/classify", params={"model": "fake"}, files=upload())
+    assert resp.status_code == 415
+
+
+def test_format_allowlist_accepts_allowed(make_client, fake_model):
+    client = make_client(allowed_image_formats=["PNG"])
+    resp = client.post("/v1/vision/classify", params={"model": "fake"}, files=upload())
+    assert resp.status_code == 200
 
 
 # -- async jobs ---------------------------------------------------------------------

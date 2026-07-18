@@ -317,12 +317,16 @@ All settings are environment variables prefixed `CORALAPI_`:
 | `CORALAPI_MODEL_SOURCE` | Coral test_data mirror | Base URL for model downloads (must be `https`) |
 | `CORALAPI_MODEL_DOWNLOAD` | `true` | Disable to serve only local models |
 | `CORALAPI_ALLOW_INSECURE_MODEL_SOURCE` | `false` | Permit a non-HTTPS `model_source` (not recommended) |
-| `CORALAPI_MAX_DOWNLOADED_MODELS` | `100` | Cap on models cached to disk via download |
+| `CORALAPI_MAX_DOWNLOADED_MODELS` | `100` | Cap on models cached to disk via download (count) |
+| `CORALAPI_MAX_MODEL_BYTES` | `268435456` (256 MB) | Per-model download size cap; an over-size download is aborted |
+| `CORALAPI_MAX_MODEL_CACHE_BYTES` | `4294967296` (4 GB) | Total model-cache size cap; a download over it is refused |
+| `CORALAPI_MODEL_CHECKSUMS` | `{}` | Optional JSON `{name: sha256}`; a listed model's download is verified |
 | `CORALAPI_QUEUE_DEPTH` | `16` | Requests allowed to wait for the TPU (else `429`) |
 | `CORALAPI_JOB_RETENTION_SECONDS` | `3600` | How long finished async job results are pollable |
 | `CORALAPI_MAX_UPLOAD_BYTES` | `524288000` (500 MB) | Request-body size limit (`413` beyond; enforced at the ASGI layer) |
 | `CORALAPI_UPLOAD_DIR` | `<tmp>/coralapi-uploads` | Directory streamed uploads are written to |
 | `CORALAPI_MAX_IMAGE_DIM` | `15360` (16K) | Longest allowed image edge in pixels |
+| `CORALAPI_ALLOWED_IMAGE_FORMATS` | `[]` (any) | Optional JSON list of decoded formats to accept (e.g. `["JPEG","PNG"]`); others get `415` |
 | `CORALAPI_MAX_VIDEO_DIM` | `15360` (16K) | Reserved for the planned video endpoints |
 | `CORALAPI_EDGETPU_LIB` | unset | Override the libedgetpu shared-library path |
 | `CORALAPI_METRICS_ENABLED` | `false` | Expose Prometheus metrics at `/metrics` |
@@ -334,10 +338,12 @@ All settings are environment variables prefixed `CORALAPI_`:
 | Profile | Target | Build |
 |---|---|---|
 | **avx2** (default) | x86-64 with AVX2 (Intel Haswell / 2013+, most modern CPUs) | `docker build -t coralapi .` |
-| **compat** | x86-64 **without** AVX2 (e.g. Sandy/Ivy Bridge Xeon) | `--build-arg TFLITE_SPEC=tflite-runtime==2.14.0 --build-arg LIBEDGETPU_DEB=<feranick 2.13.1 std .deb>` |
-| **arm** | Raspberry Pi (armhf) | `--platform linux/arm/v7` plus the armhf `LIBEDGETPU_DEB` and armv7l `TFLITE_SPEC` wheel |
+| **compat** | x86-64 **without** AVX2 (e.g. Sandy/Ivy Bridge Xeon) | `--build-arg TFLITE_SPEC=tflite-runtime==2.14.0 --build-arg LIBEDGETPU_DEB=<feranick 2.13.1 std .deb> --build-arg LIBEDGETPU_SHA256=4ffb6c2251b61535afb6b368d821211a914d2d4783770ec7e6001c073c2d193b` |
+| **arm** | Raspberry Pi (armhf) | `--platform linux/arm/v7` plus the armhf `LIBEDGETPU_DEB` and armv7l `TFLITE_SPEC` wheel, each with its matching `LIBEDGETPU_SHA256` / `TFLITE_SHA256` |
 
 Not sure whether your CPU has AVX2? Run `grep -o avx2 /proc/cpuinfo` — no output means use **compat**.
+
+Whenever you override `LIBEDGETPU_DEB` or point `TFLITE_SPEC` at a wheel URL, also pass the matching `LIBEDGETPU_SHA256` / `TFLITE_SHA256` (get it with `sha256sum`). The build verifies every downloaded artifact against the pinned checksum and fails on a mismatch, so a stale default checksum stops the build rather than silently installing the wrong binary.
 
 The default (avx2) uses the [feranick](https://github.com/feranick/libedgetpu) matched pair (libedgetpu + tflite_runtime at the same TF version — the reliable pairing rule, since no formal compatibility matrix is published). The **compat** profile pairs Google's PyPI `tflite-runtime` 2.14.0 (built without AVX2) with feranick's nearest libedgetpu (2.13.1) — verified working end-to-end on a no-AVX2 Xeon. See [Troubleshooting](#troubleshooting) if inference fails.
 
@@ -360,8 +366,12 @@ Set `CORALAPI_METRICS_ENABLED=true` to expose Prometheus metrics at `GET /metric
 The service ships **without authentication or rate limiting** — deploy it behind an authenticated gateway/ingress and add per-client rate limiting there. Given that posture, it still bounds unauthenticated resource use and avoids leaking internals:
 
 - **Upload flooding** is capped at the ASGI layer: an over-limit `Content-Length` is rejected before any body is read, and a chunked body is aborted once it passes the limit — a body never fills the disk regardless of what the client declares.
-- **Model downloads** run server-side against `CORALAPI_MODEL_SOURCE`: HTTPS-only, redirects not followed (no SSRF pivot), model names allowlist-validated against path traversal, on-disk cache bounded by `CORALAPI_MAX_DOWNLOADED_MODELS`.
-- **Error responses are generic**; download URLs, filesystem paths, and library errors are logged server-side, never returned to clients (this includes async `job.error`).
+- **Model downloads** run server-side against `CORALAPI_MODEL_SOURCE`: HTTPS-only, redirects not followed (no SSRF pivot), and model names allowlist-validated against path traversal. Disk use is bounded three ways — a per-model byte cap (`CORALAPI_MAX_MODEL_BYTES`, enforced against the declared `Content-Length` and again as a running total so a lying server can't overshoot), a total-cache byte cap (`CORALAPI_MAX_MODEL_CACHE_BYTES`), and a model count cap (`CORALAPI_MAX_DOWNLOADED_MODELS`). Auto-fetched label sidecars carry their own tight cap.
+- **Model integrity** is pinnable: list a model's sha256 in `CORALAPI_MODEL_CHECKSUMS` and a download whose hash doesn't match is deleted and rejected rather than served.
+- **Decoded-image formats** can be restricted with `CORALAPI_ALLOWED_IMAGE_FORMATS` to shrink the Pillow attack surface; uploads still get full PIL content validation regardless.
+- **Internal paths are not disclosed**: `/v1/models` returns model filenames (not absolute server paths), and `/readyz`, `/v1/status`, and the reset response report device counts rather than sysfs paths.
+- **Error responses are generic**; download URLs, filesystem paths, and library errors are logged server-side, never returned to clients (this includes async `job.error` and the `/v1/reset` failure path).
+- **Supply chain**: the container build pins the `uv` image by version and verifies every downloaded `libedgetpu`/`tflite` artifact against a sha256 checksum, failing the build on mismatch. The K8s manifests cap both the uploads and models volumes with `sizeLimit` to back the application-layer byte caps.
 - **Async job IDs are unguessable** (UUID4) but have no per-caller ownership — anyone with a job id can read its result. Treat job ids as bearer secrets; the gateway is the trust boundary.
 - **The container runs as a non-root user**; the Kubernetes manifest sets `runAsNonRoot`, a read-only root filesystem, drops all capabilities, and prefers a device plugin over a privileged pod.
 
